@@ -1,0 +1,52 @@
+# Binaries
+/go-mcp-proxy
+/go-mcp-proxy.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# Build
+/dist/
+/bin/
+
+# Dependency
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Debug
+*.log
+__debug_bin*
+
+# Environment
+.env
+.env.local
