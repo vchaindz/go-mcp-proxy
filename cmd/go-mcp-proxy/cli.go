@@ -52,6 +52,33 @@ func runCLI(verb string, args []string, transType string, insecure bool, headers
 	return fmt.Errorf("unknown verb %q", verb)
 }
 
+// loadJSONArgs returns s unchanged, or if s starts with "@", reads the file at
+// s[1:] and returns its contents. The "@file" form sidesteps shell-quoting
+// issues — particularly on Windows cmd.exe, where single quotes are literal
+// and inner double quotes get stripped by the shell.
+func loadJSONArgs(s string) (string, error) {
+	if !strings.HasPrefix(s, "@") {
+		return s, nil
+	}
+	path := s[1:]
+	if path == "" {
+		return "", errors.New("@: missing file path after '@'")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read JSON args from %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// jsonArgHint is the multi-line hint shown when JSON args fail to parse. Most
+// of the time the failure is shell-quoting on Windows; we cover the three
+// common patterns so the user can pick one that works in their shell.
+const jsonArgHint = `Pass JSON args one of three ways:
+  Unix shell:    '{"key":1}'
+  Windows cmd:   "{\"key\":1}"
+  Any shell:     @args.json   (reads JSON from a file — no quoting needed)`
+
 // parseFlexible lets users freely interleave positionals and flags within a
 // subcommand. The stdlib flag package stops at the first non-flag, so we loop:
 // parse → take one positional → parse the rest → repeat.
@@ -203,17 +230,22 @@ func cmdCall(args []string, transType string, insecure bool, headers proxy.Heade
 		return err
 	}
 	if len(positionals) < 2 {
-		return fmt.Errorf(`usage: call <url> <tool-name> [json-args]
-example: call http://server prtg_get_sensors '{"compact":true,"limit":1}'`)
+		return fmt.Errorf(`usage: call <url> <tool-name> [json-args | @path/to/args.json]
+example: call http://server prtg_get_sensors '{"compact":true,"limit":1}'
+example: call http://server prtg_get_sensors @args.json`)
 	}
 	url := positionals[0]
 	toolName := positionals[1]
 	argStr := "{}"
 	if len(positionals) >= 3 {
-		argStr = positionals[2]
+		loaded, err := loadJSONArgs(positionals[2])
+		if err != nil {
+			return err
+		}
+		argStr = loaded
 	}
 	if !json.Valid([]byte(argStr)) {
-		return fmt.Errorf("invalid JSON args: %s", argStr)
+		return fmt.Errorf("invalid JSON args: %s\n\n%s", argStr, jsonArgHint)
 	}
 
 	ctx, cancel := makeContext()

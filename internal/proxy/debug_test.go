@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -245,6 +246,36 @@ func TestDebugClient_LegacySSE(t *testing.T) {
 
 func contains(b []byte, s string) bool {
 	return bytesIndex(b, []byte(s)) >= 0
+}
+
+func TestLoadREPLJSONArgs_ReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/args.json"
+	want := `{"sensor_id":30235}`
+	if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadREPLJSONArgs("@" + path)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestLoadREPLJSONArgs_MissingFile(t *testing.T) {
+	_, err := loadREPLJSONArgs("@/nonexistent/path/that/should/not/exist.json")
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+func TestLoadREPLJSONArgs_BareAt(t *testing.T) {
+	_, err := loadREPLJSONArgs("@")
+	if err == nil {
+		t.Fatal("expected error for bare '@', got nil")
+	}
 }
 
 // Avoid pulling in another import — small inline implementation.

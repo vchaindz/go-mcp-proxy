@@ -44,6 +44,21 @@ Flags:
 ./go-mcp-proxy -insecure https://10.0.0.5:8443/mcp
 ```
 
+### Calling tools (subcommand mode)
+
+```bash
+# Linux/macOS — single quotes are fine
+./go-mcp-proxy call https://mcp.example.com/mcp prtg_get_sensors '{"limit":1}'
+
+# Windows cmd.exe — single quotes are literal; escape inner double quotes
+mcp-sse-proxy.exe call https://mcp.example.com/mcp prtg_get_sensors "{\"limit\":1}"
+
+# Any shell — read JSON from a file (no quoting headaches)
+./go-mcp-proxy call https://mcp.example.com/mcp prtg_get_sensors @args.json
+```
+
+The `@file` form also works inside the `debug` REPL (`call prtg_get_sensors @args.json`).
+
 ### Using a config file
 
 Create a JSON config:

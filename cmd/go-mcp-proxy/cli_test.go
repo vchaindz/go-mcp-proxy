@@ -237,6 +237,50 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(<-done)
 }
 
+func TestLoadJSONArgs_Inline(t *testing.T) {
+	got, err := loadJSONArgs(`{"k":1}`)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != `{"k":1}` {
+		t.Errorf("inline arg should pass through unchanged, got %q", got)
+	}
+}
+
+func TestLoadJSONArgs_File(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/args.json"
+	want := `{"sensor_id":30235}`
+	if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadJSONArgs("@" + path)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestLoadJSONArgs_FileMissing(t *testing.T) {
+	_, err := loadJSONArgs("@/nonexistent/path/that/should/not/exist.json")
+	if err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+	// The error must mention the path so the user can see what they typed.
+	if !strings.Contains(err.Error(), "/nonexistent/path/that/should/not/exist.json") {
+		t.Errorf("error should include the path, got: %v", err)
+	}
+}
+
+func TestLoadJSONArgs_EmptyAt(t *testing.T) {
+	_, err := loadJSONArgs("@")
+	if err == nil {
+		t.Fatal("expected error for bare '@', got nil")
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

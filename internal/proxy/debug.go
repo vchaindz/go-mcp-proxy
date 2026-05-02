@@ -651,15 +651,23 @@ func (c *Client) runCommand(line string) (quit bool) {
 	case "call":
 		toolName, argStr := splitCommand(rest)
 		if toolName == "" {
-			log.Println("usage: call <tool-name> <json-args>")
+			log.Println("usage: call <tool-name> <json-args | @path/to/args.json>")
 			return false
 		}
 		argStr = strings.TrimSpace(argStr)
 		if argStr == "" {
 			argStr = "{}"
 		}
+		if strings.HasPrefix(argStr, "@") {
+			loaded, err := loadREPLJSONArgs(argStr)
+			if err != nil {
+				log.Printf("call: %v", err)
+				return false
+			}
+			argStr = loaded
+		}
 		if !json.Valid([]byte(argStr)) {
-			log.Printf("invalid JSON args: %s", argStr)
+			log.Printf("invalid JSON args: %s\n%s", argStr, replJSONArgHint)
 			return false
 		}
 		if _, err := c.CallTool(toolName, json.RawMessage(argStr)); err != nil {
@@ -680,6 +688,24 @@ func (c *Client) runCommand(line string) (quit bool) {
 	return false
 }
 
+// loadREPLJSONArgs reads JSON args from a file when the REPL user types
+// "@path". The "@file" form sidesteps shell-quoting issues and also lets the
+// REPL accept multi-line JSON payloads from disk.
+func loadREPLJSONArgs(s string) (string, error) {
+	path := strings.TrimPrefix(s, "@")
+	if path == "" {
+		return "", fmt.Errorf("missing file path after '@'")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read JSON args from %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// replJSONArgHint mirrors the CLI hint shown when JSON args fail to parse.
+const replJSONArgHint = `hint: try @args.json to read JSON from a file (avoids shell-quoting issues)`
+
 func splitCommand(line string) (cmd, rest string) {
 	line = strings.TrimSpace(line)
 	if i := strings.IndexAny(line, " \t"); i >= 0 {
@@ -695,8 +721,9 @@ func (c *Client) printREPLHelp() {
   resources            List resources (resources/list)
   prompts              List prompts (prompts/list)
   ping                 Send a ping request
-  call <name> <json>   Call a tool. Example:
+  call <name> <json>   Call a tool. Examples:
                          call prtg_get_sensors {"compact":true,"limit":1}
+                         call prtg_get_sensors @args.json
   raw <json>           Send a raw JSON-RPC envelope verbatim
   headers              Show transport, session, and HTTP headers
   help                 This help
