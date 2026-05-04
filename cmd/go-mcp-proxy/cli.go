@@ -11,7 +11,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"go-mcp-proxy/internal/proxy"
 )
@@ -72,12 +75,95 @@ func loadJSONArgs(s string) (string, error) {
 }
 
 // jsonArgHint is the multi-line hint shown when JSON args fail to parse. Most
-// of the time the failure is shell-quoting on Windows; we cover the three
-// common patterns so the user can pick one that works in their shell.
-const jsonArgHint = `Pass JSON args one of three ways:
-  Unix shell:    '{"key":1}'
-  Windows cmd:   "{\"key\":1}"
-  Any shell:     @args.json   (reads JSON from a file — no quoting needed)`
+// of the time the failure is shell-quoting; we cover the common patterns so
+// the user can pick one that works in their shell.
+const jsonArgHint = `Pass JSON args one of these ways:
+  Unix shell / PowerShell:   '{"key":1}'      (single quotes preserve the JSON literally)
+  Windows cmd:               "{\"key\":1}"
+  Any shell:                 @args.json       (reads JSON from a file — no quoting needed)`
+
+// barewordKeyRE detects the unmistakable "shell stripped my double quotes"
+// pattern: an opening brace followed by a bareword identifier and a colon,
+// e.g. {sensor_id:65635}. Matches at the very start of the input — we
+// deliberately don't try to handle nested or post-comma occurrences here,
+// because PowerShell strips ALL bare double quotes uniformly, so detecting
+// the symptom at position 0 is enough to identify the cause.
+var barewordKeyRE = regexp.MustCompile(`^\s*\{\s*[A-Za-z_][A-Za-z0-9_]*\s*:`)
+
+// quoteBarewordKeysRE finds bareword keys throughout the string for the
+// "did you mean?" reconstruction. We match `(start-or-{-or-,) bareword :`
+// and rewrite to `$1"bareword":`. This is a recovery heuristic, not a
+// general JSON5 parser — if it produces something that round-trips through
+// encoding/json, we suggest it; otherwise we stay silent.
+var quoteBarewordKeysRE = regexp.MustCompile(`([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)`)
+
+// diagnoseJSONArgs builds a multi-line debug report for invalid JSON args.
+// Goal: when the user pastes something that *looks* like JSON but isn't,
+// give them everything they need to figure out why in one shot — exactly
+// what bytes we received, the underlying parser error, a shell-specific
+// guess at the cause, and a "did you mean?" auto-recovery suggestion when
+// we can mechanically rebuild a valid input.
+func diagnoseJSONArgs(input string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "received %d bytes: %s\n", len(input), quoteForDisplay(input))
+	if err := json.Unmarshal([]byte(input), new(json.RawMessage)); err != nil {
+		fmt.Fprintf(&b, "parse error: %v\n", err)
+	}
+	if barewordKeyRE.MatchString(input) {
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "→ looks like your shell stripped the double quotes around the JSON keys.")
+		fmt.Fprintln(&b, "  This is the default behaviour in PowerShell and cmd.exe for bare-quoted args.")
+	}
+	if fixed, ok := tryRecoverJSON(input); ok {
+		fmt.Fprintln(&b, "")
+		fmt.Fprintf(&b, "did you mean: '%s'\n", fixed)
+		fmt.Fprintln(&b, "  (in PowerShell / Unix shell, wrap the JSON in single quotes as shown)")
+	}
+	fmt.Fprintln(&b, "")
+	fmt.Fprint(&b, jsonArgHint)
+	return b.String()
+}
+
+// tryRecoverJSON attempts to reconstruct valid JSON by quoting bareword keys.
+// Returns the fixed string and true if the result parses, false otherwise.
+// We only do object-style recovery; array literals and other shapes aren't
+// affected by quote-stripping the same way.
+func tryRecoverJSON(input string) (string, bool) {
+	candidate := quoteBarewordKeysRE.ReplaceAllString(input, `$1"$2"$3`)
+	if candidate == input {
+		return "", false
+	}
+	if json.Valid([]byte(candidate)) {
+		return candidate, true
+	}
+	return "", false
+}
+
+// quoteForDisplay renders a string for display in a one-line error message.
+// strconv.Quote would also do this, but produces "..." which is visually
+// confusable with the JSON payload itself; we use «...» so the boundary
+// stands out, and escape unprintables so a stray CR/LF doesn't wreck the
+// terminal output.
+func quoteForDisplay(s string) string {
+	var b strings.Builder
+	b.WriteString("«")
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			b.WriteString(`\x` + strconv.FormatInt(int64(r), 16))
+		}
+	}
+	b.WriteString("»")
+	return b.String()
+}
 
 // parseFlexible lets users freely interleave positionals and flags within a
 // subcommand. The stdlib flag package stops at the first non-flag, so we loop:
@@ -245,7 +331,7 @@ example: call http://server prtg_get_sensors @args.json`)
 		argStr = loaded
 	}
 	if !json.Valid([]byte(argStr)) {
-		return fmt.Errorf("invalid JSON args: %s\n\n%s", argStr, jsonArgHint)
+		return fmt.Errorf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
 	}
 
 	ctx, cancel := makeContext()

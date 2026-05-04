@@ -212,7 +212,18 @@ func main() {
 	select {
 	case line, ok := <-stdinCh:
 		if !ok {
-			log.Fatal("stdin closed before receiving first message")
+			// In proxy mode we expect MCP JSON-RPC frames on stdin (the host
+			// process — Claude Desktop, Cursor, etc. — pipes them in). When a
+			// human runs the binary directly with no stdin, they almost
+			// always meant to use a CLI subcommand. Spell that out so the
+			// failure mode isn't a mystery.
+			log.Println("stdin closed before receiving first message.")
+			log.Println("proxy mode reads MCP JSON-RPC frames on stdin from the host process.")
+			log.Println("if you're invoking this from a terminal, you probably wanted a subcommand:")
+			log.Println("  go-mcp-proxy tools  <url>             # list tools")
+			log.Println("  go-mcp-proxy call   <url> <tool> [args|@file]   # call a tool")
+			log.Println("  go-mcp-proxy debug  <url>             # interactive REPL")
+			log.Fatal("see -h for the full command list")
 		}
 		firstLine = line
 	case <-time.After(30 * time.Second):

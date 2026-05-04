@@ -50,12 +50,22 @@ Flags:
 # Linux/macOS — single quotes are fine
 ./go-mcp-proxy call https://mcp.example.com/mcp prtg_get_sensors '{"limit":1}'
 
+# Windows PowerShell — single quotes preserve the JSON literally (same as Unix)
+.\mcp-sse-proxy.exe call https://mcp.example.com/mcp prtg_get_sensors '{"limit":1}'
+
 # Windows cmd.exe — single quotes are literal; escape inner double quotes
 mcp-sse-proxy.exe call https://mcp.example.com/mcp prtg_get_sensors "{\"limit\":1}"
 
 # Any shell — read JSON from a file (no quoting headaches)
 ./go-mcp-proxy call https://mcp.example.com/mcp prtg_get_sensors @args.json
 ```
+
+> **Why this matters on Windows:** PowerShell and `cmd.exe` both strip bare
+> double quotes from arguments before the program sees them, so passing
+> `{"sensor_id":65635}` ends up as `{sensor_id:65635}` (invalid JSON). The
+> proxy detects this case and prints a "did you mean" suggestion, but the
+> simplest fix is to wrap the whole payload in single quotes (PowerShell)
+> or use `@file` form.
 
 The `@file` form also works inside the `debug` REPL (`call prtg_get_sensors @args.json`).
 

@@ -10,11 +10,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const debugInitParams = `{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"go-mcp-proxy-debug","version":"1.0"}}`
@@ -667,7 +669,7 @@ func (c *Client) runCommand(line string) (quit bool) {
 			argStr = loaded
 		}
 		if !json.Valid([]byte(argStr)) {
-			log.Printf("invalid JSON args: %s\n%s", argStr, replJSONArgHint)
+			log.Printf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
 			return false
 		}
 		if _, err := c.CallTool(toolName, json.RawMessage(argStr)); err != nil {
@@ -703,8 +705,78 @@ func loadREPLJSONArgs(s string) (string, error) {
 	return string(data), nil
 }
 
-// replJSONArgHint mirrors the CLI hint shown when JSON args fail to parse.
-const replJSONArgHint = `hint: try @args.json to read JSON from a file (avoids shell-quoting issues)`
+// jsonArgHint mirrors the CLI hint shown when JSON args fail to parse. We
+// duplicate it across the package boundary deliberately — the strings drift
+// independently because the REPL has slightly different ergonomics (no shell
+// to misquote things, but multi-line input matters more), and importing
+// across `cmd` ↔ `internal` would require lifting it into a third package
+// for a five-line constant.
+const jsonArgHint = `Pass JSON args one of these ways:
+  Inline:                   {"key":1}        (REPL doesn't strip quotes)
+  Multi-line / from file:   @args.json       (read JSON from disk)`
+
+// barewordKeyRE detects the "{barekey:value" symptom — the user pasted JSON
+// from a shell that stripped its double quotes. In the REPL this is rare
+// (no shell in the loop) but worth catching for users who paste pre-mangled
+// snippets from elsewhere.
+var barewordKeyRE = regexp.MustCompile(`^\s*\{\s*[A-Za-z_][A-Za-z0-9_]*\s*:`)
+
+var quoteBarewordKeysRE = regexp.MustCompile(`([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)`)
+
+// diagnoseJSONArgs builds a multi-line debug report for invalid JSON args
+// in the REPL. Same shape as the CLI version: bytes received, parse error,
+// "did you mean?" reconstruction when we can recover, and the input hint.
+func diagnoseJSONArgs(input string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "received %d bytes: %s\n", len(input), quoteForDisplay(input))
+	if err := json.Unmarshal([]byte(input), new(json.RawMessage)); err != nil {
+		fmt.Fprintf(&b, "parse error: %v\n", err)
+	}
+	if barewordKeyRE.MatchString(input) {
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "→ JSON keys are missing their surrounding double quotes.")
+		fmt.Fprintln(&b, "  If you copied this from a Windows shell, the shell stripped them before the REPL ever saw the input.")
+	}
+	if fixed, ok := tryRecoverJSON(input); ok {
+		fmt.Fprintln(&b, "")
+		fmt.Fprintf(&b, "did you mean: %s\n", fixed)
+	}
+	fmt.Fprintln(&b, "")
+	fmt.Fprint(&b, jsonArgHint)
+	return b.String()
+}
+
+func tryRecoverJSON(input string) (string, bool) {
+	candidate := quoteBarewordKeysRE.ReplaceAllString(input, `$1"$2"$3`)
+	if candidate == input {
+		return "", false
+	}
+	if json.Valid([]byte(candidate)) {
+		return candidate, true
+	}
+	return "", false
+}
+
+func quoteForDisplay(s string) string {
+	var b strings.Builder
+	b.WriteString("«")
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			b.WriteString(`\x` + strconv.FormatInt(int64(r), 16))
+		}
+	}
+	b.WriteString("»")
+	return b.String()
+}
 
 func splitCommand(line string) (cmd, rest string) {
 	line = strings.TrimSpace(line)

@@ -281,6 +281,61 @@ func TestLoadJSONArgs_EmptyAt(t *testing.T) {
 	}
 }
 
+// TestDiagnoseJSONArgs_PowerShellQuoteStripping covers the screenshot scenario:
+// PowerShell stripped the double quotes from {"sensor_id":65635}, so the program
+// saw {sensor_id:65635}. The diagnostic must (a) echo the bytes received,
+// (b) call out PowerShell/cmd as the likely culprit, and (c) suggest the
+// recovered form so the user can copy-paste a fix.
+func TestDiagnoseJSONArgs_PowerShellQuoteStripping(t *testing.T) {
+	out := diagnoseJSONArgs(`{sensor_id:65635}`)
+	for _, want := range []string{
+		"received 17 bytes",
+		"{sensor_id:65635}",
+		"PowerShell",
+		`did you mean: '{"sensor_id":65635}'`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("diagnostic missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
+// TestDiagnoseJSONArgs_NoFalseRecovery makes sure we don't suggest a fix when
+// the bareword-quoting heuristic produces something that still doesn't parse.
+// Random garbage should fall through to the generic hint without a "did you mean".
+func TestDiagnoseJSONArgs_NoFalseRecovery(t *testing.T) {
+	out := diagnoseJSONArgs(`not json at all`)
+	if strings.Contains(out, "did you mean") {
+		t.Errorf("should not suggest recovery for unrecoverable input\n%s", out)
+	}
+	if !strings.Contains(out, "Pass JSON args") {
+		t.Errorf("missing generic hint\n%s", out)
+	}
+}
+
+// TestTryRecoverJSON_NestedObject confirms the bareword-key auto-quoter
+// handles nested objects, since PowerShell strips quotes everywhere.
+func TestTryRecoverJSON_NestedObject(t *testing.T) {
+	fixed, ok := tryRecoverJSON(`{a:1,b:{c:"keep me"}}`)
+	if !ok {
+		t.Fatalf("expected recovery, got none")
+	}
+	want := `{"a":1,"b":{"c":"keep me"}}`
+	if fixed != want {
+		t.Errorf("got %q, want %q", fixed, want)
+	}
+}
+
+// TestTryRecoverJSON_AlreadyValid: when the input is already valid JSON we
+// should NOT claim to have rewritten anything, even though our regex might
+// match parts of it (e.g. unquoted keys never appear in valid JSON, so this
+// is mostly belt-and-suspenders).
+func TestTryRecoverJSON_AlreadyValid(t *testing.T) {
+	if _, ok := tryRecoverJSON(`{"a":1}`); ok {
+		t.Error("should not 'recover' input that was already valid JSON")
+	}
+}
+
 func equal(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
