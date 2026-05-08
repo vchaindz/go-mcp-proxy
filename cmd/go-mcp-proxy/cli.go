@@ -109,11 +109,32 @@ func diagnoseJSONArgs(input string) string {
 	if err := json.Unmarshal([]byte(input), new(json.RawMessage)); err != nil {
 		fmt.Fprintf(&b, "parse error: %v\n", err)
 	}
-	if barewordKeyRE.MatchString(input) {
+
+	trimmed := strings.TrimSpace(input)
+	hasWrappingSingleQuotes := len(trimmed) >= 2 && trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\''
+	innerAfterUnquote := trimmed
+	if hasWrappingSingleQuotes {
+		innerAfterUnquote = trimmed[1 : len(trimmed)-1]
+	}
+
+	switch {
+	case hasWrappingSingleQuotes && barewordKeyRE.MatchString(innerAfterUnquote):
+		// The signature Windows-cmd failure: cmd.exe leaves single quotes
+		// literal AND strips the inner double quotes. Both symptoms together
+		// are unmistakable — point straight at the cause.
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "→ Windows cmd.exe kept your wrapping single quotes AND stripped the inner double quotes.")
+		fmt.Fprintln(&b, "  cmd.exe doesn't treat single quotes as quoting; use @args.json or escape: \"{\\\"key\\\":1}\".")
+	case barewordKeyRE.MatchString(input):
 		fmt.Fprintln(&b, "")
 		fmt.Fprintln(&b, "→ looks like your shell stripped the double quotes around the JSON keys.")
 		fmt.Fprintln(&b, "  This is the default behaviour in PowerShell and cmd.exe for bare-quoted args.")
+	case hasWrappingSingleQuotes:
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "→ looks like your shell kept the wrapping single quotes literally.")
+		fmt.Fprintln(&b, "  Windows cmd.exe doesn't strip single quotes; use @args.json or escape with \\\".")
 	}
+
 	if fixed, ok := tryRecoverJSON(input); ok {
 		fmt.Fprintln(&b, "")
 		fmt.Fprintf(&b, "did you mean: '%s'\n", fixed)
@@ -124,13 +145,26 @@ func diagnoseJSONArgs(input string) string {
 	return b.String()
 }
 
-// tryRecoverJSON attempts to reconstruct valid JSON by quoting bareword keys.
-// Returns the fixed string and true if the result parses, false otherwise.
-// We only do object-style recovery; array literals and other shapes aren't
-// affected by quote-stripping the same way.
+// tryRecoverJSON attempts to reconstruct valid JSON by undoing the two most
+// common shell-quoting failures: a wrapping `'…'` (cmd.exe leaves single
+// quotes literal) and bareword keys (PowerShell / cmd strip bare double
+// quotes). Returns the fixed string and true only if the rewritten input
+// actually parses — we never silently rewrite something that's still wrong.
 func tryRecoverJSON(input string) (string, bool) {
-	candidate := quoteBarewordKeysRE.ReplaceAllString(input, `$1"$2"$3`)
-	if candidate == input {
+	candidate := strings.TrimSpace(input)
+	changed := false
+
+	if len(candidate) >= 2 && candidate[0] == '\'' && candidate[len(candidate)-1] == '\'' {
+		candidate = candidate[1 : len(candidate)-1]
+		changed = true
+	}
+
+	if quoted := quoteBarewordKeysRE.ReplaceAllString(candidate, `$1"$2"$3`); quoted != candidate {
+		candidate = quoted
+		changed = true
+	}
+
+	if !changed {
 		return "", false
 	}
 	if json.Valid([]byte(candidate)) {
@@ -458,21 +492,38 @@ func printList(kind string, result json.RawMessage, limit int, full bool) error 
 		shown = limit
 	}
 
+	// --full mode emits a single JSON array on stdout so the result pipes
+	// cleanly to jq. Human summary lines (item counts, cursor) go to stderr
+	// so they don't corrupt the JSON stream.
+	if full {
+		out, err := json.MarshalIndent(items[:shown], "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal list: %w", err)
+		}
+		fmt.Println(string(out))
+		printListSummary(os.Stderr, total, shown, parsed.NextCursor)
+		return nil
+	}
+
 	for i := 0; i < shown; i++ {
 		printListItem(kind, items[i], full)
 	}
+	printListSummary(os.Stdout, total, shown, parsed.NextCursor)
+	return nil
+}
+
+func printListSummary(w io.Writer, total, shown int, nextCursor string) {
 	switch {
 	case total == 0:
-		fmt.Println("(no items)")
+		fmt.Fprintln(w, "(no items)")
 	case shown < total:
-		fmt.Printf("... (showing %d of %d; pass --limit %d or --full for more)\n", shown, total, total)
+		fmt.Fprintf(w, "... (showing %d of %d; pass --limit %d or --full for more)\n", shown, total, total)
 	default:
-		fmt.Printf("(%d items)\n", total)
+		fmt.Fprintf(w, "(%d items)\n", total)
 	}
-	if parsed.NextCursor != "" {
-		fmt.Printf("next-cursor: %s\n", parsed.NextCursor)
+	if nextCursor != "" {
+		fmt.Fprintf(w, "next-cursor: %s\n", nextCursor)
 	}
-	return nil
 }
 
 func printListItem(kind string, item json.RawMessage, full bool) {

@@ -53,7 +53,8 @@ type Client struct {
 	pendMu  sync.Mutex
 	pending map[string]chan json.RawMessage
 
-	notifCh chan json.RawMessage
+	notifCh   chan json.RawMessage
+	requestCh chan json.RawMessage // server-initiated requests (e.g. ping)
 
 	nextID atomic.Int64
 }
@@ -61,11 +62,12 @@ type Client struct {
 // NewClient creates an unconnected Client. Call Connect before issuing requests.
 func NewClient(ctx context.Context, tc *TransportConfig) *Client {
 	return &Client{
-		ctx:     ctx,
-		tc:      tc,
-		client:  NewHTTPClient(tc.Insecure, 0),
-		pending: make(map[string]chan json.RawMessage),
-		notifCh: make(chan json.RawMessage, 64),
+		ctx:       ctx,
+		tc:        tc,
+		client:    NewHTTPClient(tc.Insecure, 0),
+		pending:   make(map[string]chan json.RawMessage),
+		notifCh:   make(chan json.RawMessage, 64),
+		requestCh: make(chan json.RawMessage, 64),
 	}
 }
 
@@ -74,6 +76,7 @@ func NewClient(ctx context.Context, tc *TransportConfig) *Client {
 // Verbose is true, printed to stderr.
 func (c *Client) Connect() error {
 	go c.notificationDrain()
+	go c.requestDrain()
 
 	switch c.tc.Type {
 	case "sse":
@@ -579,10 +582,25 @@ func (c *Client) consumeResponseBody(resp *http.Response) {
 
 func (c *Client) dispatch(data []byte) {
 	var peek struct {
-		ID json.RawMessage `json:"id"`
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
 	}
 	json.Unmarshal(data, &peek)
-	if len(peek.ID) > 0 && string(peek.ID) != "null" {
+	hasID := len(peek.ID) > 0 && string(peek.ID) != "null"
+
+	// Server-initiated request: id + method present. Per JSON-RPC, these
+	// require a reply (e.g. ping liveness checks). Route to requestDrain
+	// instead of mislabelling as a notification.
+	if hasID && peek.Method != "" {
+		select {
+		case c.requestCh <- data:
+		default:
+			log.Println("inbound-request buffer full, dropping message")
+		}
+		return
+	}
+
+	if hasID {
 		c.pendMu.Lock()
 		ch, ok := c.pending[string(peek.ID)]
 		c.pendMu.Unlock()
@@ -611,6 +629,74 @@ func (c *Client) notificationDrain() {
 		case <-c.ctx.Done():
 			return
 		}
+	}
+}
+
+// requestDrain handles server-initiated JSON-RPC requests. The protocol
+// requires a reply for any frame with both `id` and `method` set (the
+// canonical case is `ping` — without a reply some servers will eventually
+// drop the connection). We answer `ping` with an empty result and reject
+// anything else with -32601 so the server doesn't hang waiting.
+func (c *Client) requestDrain() {
+	for {
+		select {
+		case data := <-c.requestCh:
+			c.handleServerRequest(data)
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+func (c *Client) handleServerRequest(data []byte) {
+	if c.Verbose {
+		fmt.Fprintf(os.Stderr, "%s ← request:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(data))
+	}
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		log.Printf("inbound request: parse error: %v", err)
+		return
+	}
+
+	var reply []byte
+	var err error
+	switch msg.Method {
+	case "ping":
+		reply, err = json.Marshal(struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Result  struct{}        `json:"result"`
+		}{JSONRPC: "2.0", ID: msg.ID})
+	default:
+		reply, err = json.Marshal(struct {
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Error   struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}{
+			JSONRPC: "2.0",
+			ID:      msg.ID,
+			Error: struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			}{Code: -32601, Message: "method not implemented by client: " + msg.Method},
+		})
+	}
+	if err != nil {
+		log.Printf("inbound request: marshal reply: %v", err)
+		return
+	}
+
+	if c.Verbose {
+		fmt.Fprintf(os.Stderr, "%s → response:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(reply))
+	}
+	if err := c.send(reply); err != nil {
+		log.Printf("inbound request: send reply: %v", err)
 	}
 }
 
