@@ -755,8 +755,15 @@ func (c *Client) runCommand(line string) (quit bool) {
 			argStr = loaded
 		}
 		if !json.Valid([]byte(argStr)) {
-			log.Printf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
-			return false
+			fixed, ok := tryRecoverJSON(argStr)
+			if !ok {
+				log.Printf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
+				return false
+			}
+			fmt.Fprintln(os.Stderr, "note: auto-recovered shell-mangled JSON args")
+			fmt.Fprintf(os.Stderr, "      original: %s\n", quoteForDisplay(argStr))
+			fmt.Fprintf(os.Stderr, "      using:    %s\n", fixed)
+			argStr = fixed
 		}
 		if _, err := c.CallTool(toolName, json.RawMessage(argStr)); err != nil {
 			log.Printf("tools/call: %v", err)
@@ -832,9 +839,24 @@ func diagnoseJSONArgs(input string) string {
 	return b.String()
 }
 
+// tryRecoverJSON undoes the two common shell-quoting failures (wrapping
+// `'…'` and bareword keys) and returns the fixed string only when the
+// rewritten input actually parses. Kept in parity with the CLI version.
 func tryRecoverJSON(input string) (string, bool) {
-	candidate := quoteBarewordKeysRE.ReplaceAllString(input, `$1"$2"$3`)
-	if candidate == input {
+	candidate := strings.TrimSpace(input)
+	changed := false
+
+	if len(candidate) >= 2 && candidate[0] == '\'' && candidate[len(candidate)-1] == '\'' {
+		candidate = candidate[1 : len(candidate)-1]
+		changed = true
+	}
+
+	if quoted := quoteBarewordKeysRE.ReplaceAllString(candidate, `$1"$2"$3`); quoted != candidate {
+		candidate = quoted
+		changed = true
+	}
+
+	if !changed {
 		return "", false
 	}
 	if json.Valid([]byte(candidate)) {

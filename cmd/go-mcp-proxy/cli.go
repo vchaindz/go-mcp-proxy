@@ -365,7 +365,14 @@ example: call http://server prtg_get_sensors @args.json`)
 		argStr = loaded
 	}
 	if !json.Valid([]byte(argStr)) {
-		return fmt.Errorf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
+		fixed, ok := tryRecoverJSON(argStr)
+		if !ok {
+			return fmt.Errorf("invalid JSON args\n%s", diagnoseJSONArgs(argStr))
+		}
+		fmt.Fprintln(os.Stderr, "note: auto-recovered shell-mangled JSON args")
+		fmt.Fprintf(os.Stderr, "      original: %s\n", quoteForDisplay(argStr))
+		fmt.Fprintf(os.Stderr, "      using:    %s\n", fixed)
+		argStr = fixed
 	}
 
 	ctx, cancel := makeContext()
