@@ -9,23 +9,75 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"go-mcp-proxy/internal/proxy"
 )
 
+// Build metadata. version is injected at release time via
+// -ldflags "-X main.version=v1.2.3 -X main.commit=<sha>"; commit/date fall
+// back to runtime/debug.ReadBuildInfo so a plain `go build` still surfaces
+// the VCS revision Go embeds automatically.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
+
+func buildInfo() (ver, sha, when string, dirty bool) {
+	ver, sha, when = version, commit, date
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			if sha == "" {
+				sha = s.Value
+			}
+		case "vcs.time":
+			if when == "" {
+				when = s.Value
+			}
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	return
+}
+
+func printVersion() {
+	ver, sha, when, dirty := buildInfo()
+	if sha == "" {
+		sha = "unknown"
+	} else if len(sha) > 12 {
+		sha = sha[:12]
+	}
+	if dirty {
+		sha += "-dirty"
+	}
+	fmt.Printf("go-mcp-proxy %s (commit %s", ver, sha)
+	if when != "" {
+		fmt.Printf(", built %s", when)
+	}
+	fmt.Println(")")
+}
+
 func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ltime)
 
 	var (
-		configPath string
-		serverName string
-		insecure   bool
-		transType  string
-		headers    proxy.HeaderFlag
-		debugURL   string
+		configPath  string
+		serverName  string
+		insecure    bool
+		transType   string
+		headers     proxy.HeaderFlag
+		debugURL    string
+		showVersion bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to JSON config file")
@@ -34,6 +86,7 @@ func main() {
 	flag.StringVar(&transType, "type", "auto", "transport: http, sse, auto")
 	flag.Var(&headers, "header", "custom header key=value (repeatable)")
 	flag.StringVar(&debugURL, "debug", "", "interactive debug client: connect to URL and start a REPL (no client-side timeouts)")
+	flag.BoolVar(&showVersion, "version", false, "print version and build commit, then exit")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [global-flags] [<command> <args...> | <server-url>]\n\n", os.Args[0])
@@ -59,6 +112,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Transport is auto-detected unless -type is specified.")
 	}
 	flag.Parse()
+
+	if showVersion {
+		printVersion()
+		return
+	}
 
 	// Subcommand dispatch: if the first positional looks like a verb (no
 	// scheme separator), treat it as a CLI command. Known verbs run; unknown
