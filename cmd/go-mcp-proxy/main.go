@@ -78,6 +78,7 @@ func main() {
 		headers     proxy.HeaderFlag
 		debugURL    string
 		showVersion bool
+		wireTrace   bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to JSON config file")
@@ -87,6 +88,7 @@ func main() {
 	flag.Var(&headers, "header", "custom header key=value (repeatable)")
 	flag.StringVar(&debugURL, "debug", "", "interactive debug client: connect to URL and start a REPL (no client-side timeouts)")
 	flag.BoolVar(&showVersion, "version", false, "print version and build commit, then exit")
+	flag.BoolVar(&wireTrace, "vv", false, "HTTP wire trace to stderr: method, URL, headers (secrets redacted), status, raw bodies (works in proxy, CLI, and REPL modes)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [global-flags] [<command> <args...> | <server-url>]\n\n", os.Args[0])
@@ -101,8 +103,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  ping <url>                   Ping the server")
 		fmt.Fprintln(os.Stderr, "  raw <url> <envelope>         Send a raw JSON-RPC envelope")
 		fmt.Fprintln(os.Stderr, "  debug <url>                  Interactive REPL")
+		fmt.Fprintln(os.Stderr, "  diag <url> [tool [args]]     Run a full diagnostic and write a report file")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Per-command flags: --limit, --cursor, --full, --json, --lines, -v")
+		fmt.Fprintln(os.Stderr, "Per-command flags: --limit, --cursor, --full, --json, --lines, -v, -vv")
 		fmt.Fprintln(os.Stderr, "(see `<cmd> -h` … for now run with no args after the verb to see usage)")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Global flags:")
@@ -118,6 +121,10 @@ func main() {
 		return
 	}
 
+	if wireTrace {
+		proxy.SetWireTrace(os.Stderr)
+	}
+
 	// Subcommand dispatch: if the first positional looks like a verb (no
 	// scheme separator), treat it as a CLI command. Known verbs run; unknown
 	// non-URL tokens error clearly so typos don't fall through into proxy mode.
@@ -130,7 +137,7 @@ func main() {
 				}
 				return
 			}
-			log.Fatalf("unknown command %q (commands: tools, resources, prompts, call, ping, raw, debug)", first)
+			log.Fatalf("unknown command %q (commands: tools, resources, prompts, call, ping, raw, debug, diag)", first)
 		}
 	}
 

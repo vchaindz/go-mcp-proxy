@@ -35,6 +35,7 @@ var knownVerbs = map[string]bool{
 	"ping":      true,
 	"raw":       true,
 	"debug":     true,
+	"diag":      true,
 }
 
 // runCLI dispatches a subcommand. args is the slice AFTER the verb. Returns
@@ -51,6 +52,8 @@ func runCLI(verb string, args []string, transType string, insecure bool, headers
 		return cmdRaw(args, transType, insecure, headers)
 	case "debug":
 		return cmdDebug(args, transType, insecure, headers)
+	case "diag":
+		return cmdDiag(args, transType, insecure, headers)
 	}
 	return fmt.Errorf("unknown verb %q", verb)
 }
@@ -230,7 +233,24 @@ func makeContext() (context.Context, func()) {
 	return ctx, cancel
 }
 
-func newConnectedClient(ctx context.Context, url, transType string, insecure bool, headers proxy.HeaderFlag, verbose bool) (*proxy.Client, error) {
+// verbosityFlags registers -v and -vv on fs and returns a resolver to call
+// after parsing. -vv enables the HTTP wire trace (method, URL, headers with
+// secrets redacted, status, raw bodies) and implies -v.
+func verbosityFlags(fs *flag.FlagSet) func() bool {
+	v := fs.Bool("v", false, "verbose: print every JSON-RPC frame to stderr")
+	vv := fs.Bool("vv", false, "very verbose: -v plus HTTP wire trace (method, URL, headers, status, raw bodies; secrets redacted)")
+	return func() bool {
+		if *vv {
+			proxy.SetWireTrace(os.Stderr)
+			return true
+		}
+		return *v
+	}
+}
+
+// buildTransportConfig resolves URL, headers, TLS, and transport type from
+// CLI inputs plus the MCP_* env var fallbacks (lowest priority).
+func buildTransportConfig(url, transType string, insecure bool, headers proxy.HeaderFlag) (*proxy.TransportConfig, error) {
 	if url == "" {
 		return nil, errors.New("URL required")
 	}
@@ -270,6 +290,14 @@ func newConnectedClient(ctx context.Context, url, transType string, insecure boo
 			tc.Insecure = true
 		}
 	}
+	return tc, nil
+}
+
+func newConnectedClient(ctx context.Context, url, transType string, insecure bool, headers proxy.HeaderFlag, verbose bool) (*proxy.Client, error) {
+	tc, err := buildTransportConfig(url, transType, insecure, headers)
+	if err != nil {
+		return nil, err
+	}
 	c := proxy.NewClient(ctx, tc)
 	c.Verbose = verbose
 	if err := c.Connect(); err != nil {
@@ -286,18 +314,18 @@ func cmdList(args []string, kind, transType string, insecure bool, headers proxy
 		cursor  string
 		full    bool
 		rawJSON bool
-		verbose bool
 	)
 	fs.IntVar(&limit, "limit", defaultPrintLimit, "max items to display (0 = no cap)")
 	fs.StringVar(&cursor, "cursor", "", "MCP pagination cursor (use the next-cursor from a previous run)")
 	fs.BoolVar(&full, "full", false, "print full JSON for each item")
 	fs.BoolVar(&rawJSON, "json", false, "emit the raw JSON result instead of formatted output")
-	fs.BoolVar(&verbose, "v", false, "verbose: print every JSON-RPC frame to stderr")
+	resolveVerbose := verbosityFlags(fs)
 
 	positionals, err := parseFlexible(fs, args)
 	if err != nil {
 		return err
 	}
+	verbose := resolveVerbose()
 	if len(positionals) < 1 {
 		return fmt.Errorf("usage: %s <url> [--limit N] [--cursor TOK] [--full] [--json]", kind)
 	}
@@ -338,17 +366,17 @@ func cmdCall(args []string, transType string, insecure bool, headers proxy.Heade
 		rawJSON  bool
 		full     bool
 		maxLines int
-		verbose  bool
 	)
 	fs.BoolVar(&rawJSON, "json", false, "emit the raw JSON result instead of formatted output")
 	fs.BoolVar(&full, "full", false, "do not truncate output (text or arrays)")
 	fs.IntVar(&maxLines, "lines", 200, "max output lines / array items per content block (0 = no cap)")
-	fs.BoolVar(&verbose, "v", false, "verbose: print every JSON-RPC frame to stderr")
+	resolveVerbose := verbosityFlags(fs)
 
 	positionals, err := parseFlexible(fs, args)
 	if err != nil {
 		return err
 	}
+	verbose := resolveVerbose()
 	if len(positionals) < 2 {
 		return fmt.Errorf(`usage: call <url> <tool-name> [json-args | @path/to/args.json]
 example: call http://server prtg_get_sensors '{"compact":true,"limit":1}'
@@ -394,12 +422,12 @@ example: call http://server prtg_get_sensors @args.json`)
 
 func cmdPing(args []string, transType string, insecure bool, headers proxy.HeaderFlag) error {
 	fs := flag.NewFlagSet("ping", flag.ContinueOnError)
-	var verbose bool
-	fs.BoolVar(&verbose, "v", false, "verbose: print every JSON-RPC frame to stderr")
+	resolveVerbose := verbosityFlags(fs)
 	positionals, err := parseFlexible(fs, args)
 	if err != nil {
 		return err
 	}
+	verbose := resolveVerbose()
 	if len(positionals) < 1 {
 		return fmt.Errorf("usage: ping <url>")
 	}
@@ -418,12 +446,12 @@ func cmdPing(args []string, transType string, insecure bool, headers proxy.Heade
 
 func cmdRaw(args []string, transType string, insecure bool, headers proxy.HeaderFlag) error {
 	fs := flag.NewFlagSet("raw", flag.ContinueOnError)
-	var verbose bool
-	fs.BoolVar(&verbose, "v", false, "verbose: print every JSON-RPC frame to stderr")
+	resolveVerbose := verbosityFlags(fs)
 	positionals, err := parseFlexible(fs, args)
 	if err != nil {
 		return err
 	}
+	verbose := resolveVerbose()
 	if len(positionals) < 2 {
 		return fmt.Errorf("usage: raw <url> <json-rpc-envelope>")
 	}
@@ -446,10 +474,12 @@ func cmdRaw(args []string, transType string, insecure bool, headers proxy.Header
 
 func cmdDebug(args []string, transType string, insecure bool, headers proxy.HeaderFlag) error {
 	fs := flag.NewFlagSet("debug", flag.ContinueOnError)
+	resolveVerbose := verbosityFlags(fs) // REPL is always -v; -vv adds the wire trace
 	positionals, err := parseFlexible(fs, args)
 	if err != nil {
 		return err
 	}
+	resolveVerbose()
 	if len(positionals) < 1 {
 		return fmt.Errorf("usage: debug <url>")
 	}

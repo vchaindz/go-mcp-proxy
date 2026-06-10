@@ -14,15 +14,17 @@ type TransportConfig struct {
 	Type      string // "http", "sse", "auto"
 }
 
-// NewHTTPClient creates an *http.Client, optionally skipping TLS certificate verification.
+// NewHTTPClient creates an *http.Client, optionally skipping TLS certificate
+// verification. Every client is wrapped in the wire tracer so SetWireTrace
+// can observe all HTTP traffic; the wrapper is a no-op while tracing is off.
 func NewHTTPClient(insecure bool, timeout time.Duration) *http.Client {
-	client := &http.Client{Timeout: timeout}
+	var base http.RoundTripper = http.DefaultTransport
 	if insecure {
-		client.Transport = &http.Transport{
+		base = &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 	}
-	return client
+	return &http.Client{Timeout: timeout, Transport: &wireTracer{base: base}}
 }
 
 // applyHeaders sets custom headers on a request. These are applied before

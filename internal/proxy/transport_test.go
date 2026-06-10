@@ -12,8 +12,12 @@ func TestNewHTTPClient_Secure(t *testing.T) {
 	if client.Timeout != 10*time.Second {
 		t.Errorf("expected 10s timeout, got %v", client.Timeout)
 	}
-	if client.Transport != nil {
-		t.Error("expected nil transport for secure client")
+	wt, ok := client.Transport.(*wireTracer)
+	if !ok {
+		t.Fatal("expected *wireTracer transport")
+	}
+	if wt.base != http.DefaultTransport {
+		t.Error("expected DefaultTransport base for secure client")
 	}
 }
 
@@ -22,9 +26,13 @@ func TestNewHTTPClient_Insecure(t *testing.T) {
 	if client.Timeout != 5*time.Second {
 		t.Errorf("expected 5s timeout, got %v", client.Timeout)
 	}
-	tr, ok := client.Transport.(*http.Transport)
+	wt, ok := client.Transport.(*wireTracer)
 	if !ok {
-		t.Fatal("expected *http.Transport")
+		t.Fatal("expected *wireTracer transport")
+	}
+	tr, ok := wt.base.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport base")
 	}
 	if !tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("expected InsecureSkipVerify=true")
@@ -43,9 +51,13 @@ func TestNewHTTPClient_InsecureZeroTimeout(t *testing.T) {
 	if client.Timeout != 0 {
 		t.Errorf("expected 0 timeout, got %v", client.Timeout)
 	}
-	tr, ok := client.Transport.(*http.Transport)
+	wt, ok := client.Transport.(*wireTracer)
 	if !ok {
-		t.Fatal("expected *http.Transport")
+		t.Fatal("expected *wireTracer transport")
+	}
+	tr, ok := wt.base.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport base")
 	}
 	if !tr.TLSClientConfig.InsecureSkipVerify {
 		t.Error("expected InsecureSkipVerify=true")

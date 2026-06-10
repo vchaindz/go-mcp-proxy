@@ -2,6 +2,8 @@
 
 A stdio-to-HTTP proxy for MCP (Model Context Protocol) servers. It lets stdio-based MCP clients like Claude Code connect to remote MCP servers over HTTP or SSE, with support for custom headers, TLS options, and authentication.
 
+For a hands-on user guide (Windows quoting, debugging workflows, REPL usage), see [docs/instructions.md](docs/instructions.md).
+
 ## Build
 
 Requires Go 1.23+.
@@ -68,6 +70,50 @@ mcp-sse-proxy.exe call https://mcp.example.com/mcp prtg_get_sensors "{\"limit\":
 > or use `@file` form.
 
 The `@file` form also works inside the `debug` REPL (`call prtg_get_sensors @args.json`).
+
+### Verbose debugging (`-v` / `-vv`)
+
+When the same command behaves differently against two servers, capture both runs
+with `-vv` and diff them:
+
+```bash
+# -v   print every JSON-RPC frame to stderr
+./go-mcp-proxy call -v  https://mcp.example.com/mcp prtg_get_sensor_status '{"sensor_id":65635}'
+
+# -vv  additionally trace the HTTP wire: method, URL, request/response headers
+#      (secrets redacted to a prefix + length), status, timing, raw bodies
+./go-mcp-proxy call -vv https://mcp.example.com/mcp prtg_get_sensor_status '{"sensor_id":65635}' 2>trace.log
+```
+
+The wire trace shows exactly what was sent and received — which URL was hit,
+whether the `Authorization` header was applied (and its length, so tokens can
+be compared without exposing them), the negotiated `Mcp-Session-Id`, response
+status, and the raw body before any parsing.
+
+`-vv` is also available as a global flag for stdio proxy mode
+(`./go-mcp-proxy -vv https://…`, trace goes to stderr/the host's MCP log),
+and inside the `debug` REPL via the `trace` command (toggles on/off).
+
+### One-shot diagnostic report (`diag`)
+
+`diag` runs the full connectivity check (connect & initialize → tools/list →
+ping → optional tool call) and writes **everything** — environment, redacted
+configuration, complete wire trace, all JSON-RPC frames, per-step results —
+into a single report file you can take with you:
+
+```bash
+# Connectivity only
+./go-mcp-proxy -header "Authorization=Bearer TOKEN" diag https://mcp.example.com/mcp
+
+# Including a tool call, with a named report file
+./go-mcp-proxy -header "Authorization=Bearer TOKEN" diag https://mcp.example.com/mcp \
+    prtg_get_sensor_status '{"sensor_id":65635}' -o customer-x.txt
+```
+
+Progress and a pass/fail summary print to the terminal; the report file
+(default `mcp-diag-<timestamp>.txt`) holds the full detail. Secrets are
+redacted to a prefix + length, so the file is safe to take off-site. The exit
+code is non-zero if any step failed.
 
 ### Using a config file
 

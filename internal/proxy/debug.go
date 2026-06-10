@@ -44,6 +44,10 @@ type Client struct {
 	// it false unless the user passes -v.
 	Verbose bool
 
+	// VerboseOut overrides where verbose frames are written (default
+	// os.Stderr). The diag command points this at the report file.
+	VerboseOut io.Writer
+
 	transport string // "http" or "sse"
 
 	sessMu     sync.Mutex
@@ -102,6 +106,14 @@ func (c *Client) Initialize() error {
 		return err
 	}
 	return c.SendNotification("notifications/initialized", json.RawMessage(`{}`))
+}
+
+// SessionInfo reports the active transport ("http" or "sse"), the negotiated
+// session ID (Streamable HTTP), and the POST endpoint (legacy SSE).
+func (c *Client) SessionInfo() (transport, sessionID, sessionURL string) {
+	c.sessMu.Lock()
+	defer c.sessMu.Unlock()
+	return c.transport, c.sessionID, c.sessionURL
 }
 
 // ListTools sends tools/list. cursor may be "" for the first page.
@@ -624,7 +636,7 @@ func (c *Client) notificationDrain() {
 		select {
 		case data := <-c.notifCh:
 			if c.Verbose {
-				fmt.Fprintf(os.Stderr, "%s ← notification:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(data))
+				fmt.Fprintf(c.verboseOut(), "%s ← notification:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(data))
 			}
 		case <-c.ctx.Done():
 			return
@@ -650,7 +662,7 @@ func (c *Client) requestDrain() {
 
 func (c *Client) handleServerRequest(data []byte) {
 	if c.Verbose {
-		fmt.Fprintf(os.Stderr, "%s ← request:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(data))
+		fmt.Fprintf(c.verboseOut(), "%s ← request:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(data))
 	}
 	var msg struct {
 		ID     json.RawMessage `json:"id"`
@@ -693,7 +705,7 @@ func (c *Client) handleServerRequest(data []byte) {
 	}
 
 	if c.Verbose {
-		fmt.Fprintf(os.Stderr, "%s → response:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(reply))
+		fmt.Fprintf(c.verboseOut(), "%s → response:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(reply))
 	}
 	if err := c.send(reply); err != nil {
 		log.Printf("inbound request: send reply: %v", err)
@@ -709,6 +721,14 @@ func (c *Client) runCommand(line string) (quit bool) {
 		return true
 	case "help", "?":
 		c.printREPLHelp()
+	case "trace":
+		if wireEnabled() {
+			SetWireTrace(nil)
+			fmt.Fprintln(os.Stderr, "HTTP wire trace: off")
+		} else {
+			SetWireTrace(os.Stderr)
+			fmt.Fprintln(os.Stderr, "HTTP wire trace: on (method, URL, headers, status, raw bodies; secrets redacted)")
+		}
 	case "headers":
 		c.sessMu.Lock()
 		fmt.Fprintf(os.Stderr, "transport=%s session_id=%q session_url=%q\n", c.transport, c.sessionID, c.sessionURL)
@@ -906,22 +926,30 @@ func (c *Client) printREPLHelp() {
                          call prtg_get_sensors @args.json
   raw <json>           Send a raw JSON-RPC envelope verbatim
   headers              Show transport, session, and HTTP headers
+  trace                Toggle HTTP wire trace (URLs, headers, status, raw bodies)
   help                 This help
   quit                 Exit (Ctrl-C also works; no client-side timeouts)`)
+}
+
+func (c *Client) verboseOut() io.Writer {
+	if c.VerboseOut != nil {
+		return c.VerboseOut
+	}
+	return os.Stderr
 }
 
 func (c *Client) printOutbound(body []byte) {
 	if !c.Verbose {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s → outbound:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(body))
+	fmt.Fprintf(c.verboseOut(), "%s → outbound:\n%s\n", time.Now().Format("15:04:05.000"), prettyJSON(body))
 }
 
 func (c *Client) printInbound(body []byte, elapsed time.Duration) {
 	if !c.Verbose {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s ← response in %.2fms:\n%s\n", time.Now().Format("15:04:05.000"), float64(elapsed.Microseconds())/1000.0, prettyJSON(body))
+	fmt.Fprintf(c.verboseOut(), "%s ← response in %.2fms:\n%s\n", time.Now().Format("15:04:05.000"), float64(elapsed.Microseconds())/1000.0, prettyJSON(body))
 }
 
 func prettyJSON(data []byte) string {
